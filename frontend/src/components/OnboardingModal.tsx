@@ -1,0 +1,321 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { Player } from '../types/game';
+import { api } from '../lib/api';
+import { Trophy, AlertCircle, Sparkles, X, UserPlus } from 'lucide-react';
+import TermsPrivacySheet from './TermsPrivacySheet';
+
+interface Props {
+  onStartGame: (player: Player) => void;
+  onOpenLeaderboard: () => void;
+}
+
+export default function OnboardingModal({ onStartGame, onOpenLeaderboard }: Props) {
+  const [name, setName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cachedPlayer, setCachedPlayer] = useState<Player | null>(null);
+  const [showTermsSheet, setShowTermsSheet] = useState(false);
+  const [termsDefaultTab, setTermsDefaultTab] = useState<'privacy' | 'terms'>('privacy');
+  const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+
+  const handleOpenTerms = (tab: 'privacy' | 'terms' = 'privacy') => {
+    setTermsDefaultTab(tab);
+    setShowTermsSheet(true);
+  };
+
+  // Load cached player
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('eh_player');
+      if (stored) {
+        const player = JSON.parse(stored);
+        setCachedPlayer(player);
+        // For shared kiosk / device: keep the input clean for the next person,
+        // unless they explicitly want to play as the cached player.
+      }
+    } catch {
+      // ignore
+    }
+
+    // Check URL parameters or hash to open terms / privacy bottom sheet directly
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('terms') === 'true' || window.location.hash === '#terms') {
+        setTermsDefaultTab('terms');
+        setShowTermsSheet(true);
+      } else if (params.get('privacy') === 'true' || window.location.hash === '#privacy') {
+        setTermsDefaultTab('privacy');
+        setShowTermsSheet(true);
+      }
+    }
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    const cleanName = name.trim();
+
+    if (!cleanName) {
+      setError('Please enter your player name');
+      return;
+    }
+
+    const isSameAsCached = Boolean(
+      cachedPlayer && cleanName.toLowerCase() === cachedPlayer.name.trim().toLowerCase()
+    );
+
+    setLoading(true);
+    try {
+      const res = await api.authPlayer({
+        name: cleanName,
+        force_new: !isSameAsCached
+      });
+
+      if (res.player) {
+        const playerObj: Player = {
+          ...res.player,
+          highest_score: isSameAsCached
+            ? Math.max(res.player.highest_score || 0, cachedPlayer?.highest_score || 0)
+            : (res.player.highest_score || 0)
+        };
+        localStorage.setItem('eh_player', JSON.stringify(playerObj));
+        onStartGame(playerObj);
+      } else {
+        setError(res.message || 'Could not start game');
+      }
+    } catch (err: unknown) {
+      console.warn('API Auth fallback, starting local player profile:', err);
+      const instantPlayer: Player = {
+        id: isSameAsCached && cachedPlayer?.id ? cachedPlayer.id : Math.floor(Math.random() * 1000000) + 1,
+        name: cleanName,
+        highest_score: isSameAsCached && cachedPlayer?.highest_score ? cachedPlayer.highest_score : 0,
+        created_at: new Date().toISOString()
+      };
+      localStorage.setItem('eh_player', JSON.stringify(instantPlayer));
+      onStartGame(instantPlayer);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-between select-none overflow-hidden bg-[#fa4ba0]">
+      {/* High-Resolution Brand Background Asset (Responsive Desktop & Mobile) */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden z-0">
+        {/* Mobile background (portrait) */}
+        <img
+          src={`${basePath}/onboarding_bg.png?v=6`}
+          alt="Tropical Ice Cream Background"
+          className="md:hidden absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
+        />
+        {/* Desktop background (wide landscape with flanking popsicles) */}
+        <img
+          src={`${basePath}/onboarding_bg_desktop.png?v=6`}
+          alt="Tropical Ice Cream Background Desktop"
+          className="hidden md:block absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
+        />
+      </div>
+
+      {/* Mobile-Only Top Floating Navigation Bar (Safely anchored above poster) */}
+      <div
+        style={{ top: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}
+        className="sm:hidden fixed inset-x-3.5 z-40 flex items-center justify-between pointer-events-none"
+      >
+        {cachedPlayer ? (
+          <div className="pointer-events-auto flex items-center space-x-1.5 bg-white/95 backdrop-blur-md border border-pink-200/80 px-2.5 py-1 rounded-full text-xs font-semibold text-slate-700 shadow-sm max-w-[58%] truncate">
+            <Sparkles className="w-3.5 h-3.5 text-pink-500 fill-pink-500 flex-shrink-0" />
+            <button
+              type="button"
+              onClick={() => setName(cachedPlayer.name)}
+              className="truncate cursor-pointer hover:underline text-left"
+              title="Tap to play as previous player"
+            >
+              <strong className="text-pink-950 font-black">{cachedPlayer.name}</strong>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCachedPlayer(null);
+                setName('');
+                localStorage.removeItem('eh_player');
+              }}
+              className="text-[10px] text-pink-600 hover:text-pink-800 font-extrabold bg-pink-100/90 hover:bg-pink-200 px-1.5 py-0.5 rounded-full cursor-pointer transition-colors flex items-center space-x-0.5"
+              title="Start as a new player"
+            >
+              <UserPlus className="w-2.5 h-2.5" />
+              <span>New</span>
+            </button>
+          </div>
+        ) : (
+          <div />
+        )}
+
+        <div className="pointer-events-auto flex items-center space-x-1.5">
+          <button
+            type="button"
+            onClick={onOpenLeaderboard}
+            className="bg-white/95 backdrop-blur-md text-amber-950 px-3.5 py-1.5 rounded-full shadow-[0_4px_16px_rgba(0,0,0,0.15)] text-xs font-black flex items-center space-x-1.5 border border-amber-300/80 active:scale-95 transition-all cursor-pointer"
+          >
+            <Trophy className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+            <span>Leaderboard</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 1. Global Desktop Header Bar */}
+      <header className="hidden sm:flex items-center justify-end w-full max-w-6xl mx-auto px-6 py-3.5 z-30 flex-shrink-0 min-h-[52px]">
+        {/* Right Action: Welcome Pill & New Player Switcher */}
+        {cachedPlayer && (
+          <div className="flex items-center space-x-2 bg-white/85 backdrop-blur-md border border-pink-200/80 px-3.5 py-1.5 rounded-full text-xs font-semibold text-slate-700 shadow-sm">
+            <Sparkles className="w-3.5 h-3.5 text-pink-500 fill-pink-500" />
+            <button
+              type="button"
+              onClick={() => setName(cachedPlayer.name)}
+              className="cursor-pointer hover:underline"
+              title="Click to play as previous player"
+            >
+              Previous: <strong className="text-pink-950 font-black">{cachedPlayer.name}</strong>
+            </button>
+            {Boolean(cachedPlayer.highest_score) && (
+              <span className="text-amber-700 font-black ml-1 bg-amber-100 px-2 py-0.5 rounded-full text-[11px] border border-amber-300/50">
+                ★ {cachedPlayer.highest_score}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setCachedPlayer(null);
+                setName('');
+                localStorage.removeItem('eh_player');
+              }}
+              className="ml-1 text-[11px] text-pink-600 hover:text-pink-800 font-black bg-pink-100 hover:bg-pink-200 px-2 py-0.5 rounded-full cursor-pointer transition-colors flex items-center space-x-1"
+            >
+              <UserPlus className="w-3 h-3" />
+              <span>New Player</span>
+            </button>
+          </div>
+        )}
+      </header>
+
+      {/* 2. Main Center Hero Stage */}
+      <main className="w-full flex-1 flex items-center justify-center relative z-20 px-2 sm:px-6 pt-[calc(env(safe-area-inset-top,0px)+52px)] pb-[calc(env(safe-area-inset-bottom,0px)+12px)] sm:py-2 overflow-hidden">
+        <div className="relative w-full max-w-6xl flex items-center justify-center h-full max-h-[85vh]">
+          
+
+          {/* Center Phone Showcase Frame */}
+          <div
+            className="relative flex items-center justify-center flex-shrink-0 select-none"
+            style={{
+              width: 'min(92vw, calc(80vh * 576 / 1024))',
+              aspectRatio: '576 / 1024',
+              maxHeight: '80vh',
+            }}
+          >
+            {/* Sleek Outer Glow Bezel & Rounded Card Frame */}
+            <div className="relative w-full h-full rounded-[26px] sm:rounded-[34px] overflow-hidden shadow-[0_20px_60px_-15px_rgba(244,63,94,0.35),0_10px_25px_rgba(0,0,0,0.08)] ring-4 ring-white/95 bg-pink-100 flex flex-col justify-between">
+              
+              {/* Authentic High-Resolution Artwork Background */}
+              <img
+                src={`${basePath}/wonder_onboarding_art.png`}
+                alt="Elephant House Wonder Onboarding"
+                className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
+              />
+
+              {/* Validation Error Toast Alert */}
+              {error && (
+                <div className="absolute left-[14%] right-[14%] top-[50%] z-30 bg-rose-600 text-white px-3.5 py-1.5 rounded-full text-[11px] sm:text-xs font-bold shadow-lg shadow-rose-950/30 flex items-center justify-center space-x-1.5 animate-bounce">
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">{error}</span>
+                </div>
+              )}
+
+              {/* Interactive Form Controls Overlay (Pixel-matched with inner input pill and 3D play button) */}
+              <form onSubmit={handleSubmit} className="absolute inset-0 z-20 pointer-events-none">
+                {/* Player Name Input: Seamless transparent overlay over the artwork's 3D pill */}
+                <div
+                  className="absolute pointer-events-auto flex items-center justify-center"
+                  style={{ left: '15.63%', top: '65.04%', width: '68.32%', height: '5.76%' }}
+                >
+                  <div className="relative w-full h-full flex items-center">
+                    <input
+                      type="text"
+                      id="player-name-input"
+                      name="playerName"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Enter your name..."
+                      maxLength={30}
+                      required
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="words"
+                      spellCheck={false}
+                      className="onboarding-name-input w-full h-full bg-transparent text-[#701047] font-black text-[16px] sm:text-base md:text-lg rounded-full px-5 shadow-none border-0 outline-none focus:outline-none focus:ring-0 transition-all placeholder:text-pink-300 placeholder:font-bold text-center selection:bg-pink-300 selection:text-pink-950"
+                      style={{
+                        WebkitTextFillColor: '#701047',
+                      }}
+                    />
+                    {name && (
+                      <button
+                        type="button"
+                        onClick={() => setName('')}
+                        aria-label="Clear name"
+                        className="absolute right-2 p-1 text-pink-500 hover:text-pink-700 bg-pink-100/80 hover:bg-pink-200 rounded-full transition-all cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* PLAY NOW! Button Overlay */}
+                <div
+                  className="absolute pointer-events-auto"
+                  style={{ left: '19.97%', top: '74.22%', width: '59.90%', height: '12.70%' }}
+                >
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    aria-label="Play Now"
+                    className="w-full h-full rounded-full cursor-pointer transition-transform duration-150 hover:scale-[1.03] active:scale-[0.96] disabled:opacity-75 disabled:cursor-not-allowed flex items-center justify-center select-none bg-transparent"
+                  >
+                    {loading && (
+                      <div className="flex items-center space-x-2 bg-pink-950/85 backdrop-blur-md px-4 py-2 rounded-full text-white shadow-xl">
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span className="text-xs font-black tracking-wider uppercase">STARTING...</span>
+                      </div>
+                    )}
+                  </button>
+                </div>
+              </form>
+
+              {/* Terms of use Button Text (centered at bottom edge of card poster, below chevron banner) */}
+              <div
+                className="absolute inset-x-0 bottom-[0.5%] sm:bottom-[0.7%] z-20 flex justify-center pointer-events-auto select-none"
+              >
+                <button
+                  type="button"
+                  onClick={() => handleOpenTerms('privacy')}
+                  className="text-[11px] sm:text-xs font-bold text-white/90 hover:text-white underline underline-offset-2 decoration-white/70 hover:decoration-white transition-all active:scale-95 cursor-pointer drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)] py-0.5 px-3"
+                >
+                  Terms of use
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </main>
+
+      {/* Terms & Privacy Bottom Sheet Modal */}
+      <TermsPrivacySheet
+        isOpen={showTermsSheet}
+        onClose={() => setShowTermsSheet(false)}
+        defaultTab={termsDefaultTab}
+      />
+    </div>
+  );
+}

@@ -1,0 +1,7 @@
+---
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/${USER:-$(whoami)}/public_html/kiosk
+    - /bin/mkdir -p $DEPLOYPATH
+    - /bin/cp -Rf * $DEPLOYPATH/ 2>/dev/null || true
+    - /bin/cp -f .htaccess $DEPLOYPATH/ 2>/dev/null || true
