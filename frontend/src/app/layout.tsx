@@ -12,9 +12,9 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH !== undefined ? process.env.N
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'https://ehwonderonline.com/kiosk'),
-  title: 'Elephant House Ice Cream | AR Tongue Catch Game',
-  description: 'Catch delicious Elephant House ice cream popsicles with your mouth and tongue! Score marks and climb the leaderboard in this interactive AR camera game.',
-  keywords: ['Elephant House', 'Ice Cream', 'Popsicle Game', 'AR Game', 'Tongue Catch', 'Sri Lanka'],
+  title: 'Elephant House Ice Cream | Sampath Bat AR Cricket Catch Game',
+  description: 'Detect your cricket bat via camera and swing to catch delicious falling Elephant House ice creams! Score runs and climb the leaderboard in this interactive AR camera game.',
+  keywords: ['Elephant House', 'Ice Cream', 'Cricket Bat', 'AR Game', 'Sampath Bat', 'Camera Game', 'Sri Lanka'],
   icons: {
     icon: [
       { url: `${basePath}/favicon.ico` },
@@ -25,8 +25,8 @@ export const metadata: Metadata = {
     apple: `${basePath}/logo.png`,
   },
   openGraph: {
-    title: 'Elephant House AR Tongue Catch Game',
-    description: 'Catch delicious falling popsicles with your tongue and win marks!',
+    title: 'Elephant House & Sampath Bat AR Cricket Catch Game',
+    description: 'Detect your cricket bat via camera and swing to catch falling popsicles and ice creams!',
     type: 'website',
     url: 'https://ehwonderonline.com/kiosk/',
     siteName: 'Elephant House Wonder Game',
@@ -36,15 +36,15 @@ export const metadata: Metadata = {
         secureUrl: 'https://ehwonderonline.com/kiosk/og_image.png',
         width: 1200,
         height: 630,
-        alt: 'Elephant House AR Tongue Catch Game',
+        alt: 'Sampath Bat AR Cricket Catch Game',
         type: 'image/png',
       },
     ],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Elephant House AR Tongue Catch Game',
-    description: 'Catch delicious falling popsicles with your tongue and win marks!',
+    title: 'Elephant House & Sampath Bat AR Cricket Catch Game',
+    description: 'Detect your cricket bat via camera and swing to catch falling popsicles and ice creams!',
     images: ['https://ehwonderonline.com/kiosk/og_image.png'],
   }
 };

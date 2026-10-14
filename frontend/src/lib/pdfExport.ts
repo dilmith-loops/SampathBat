@@ -74,8 +74,8 @@ export async function exportToPDF(type: 'users' | 'scores', stats?: AdminStats |
   doc.setTextColor(255, 240, 245);
   const title =
     type === 'users'
-      ? 'AR Tongue Catch Game — Registered Players Report'
-      : 'AR Tongue Catch Game — Session Score Logs Report';
+      ? 'AR Cricket Bat Catch Game — Registered Players Report'
+      : 'AR Cricket Bat Catch Game — Session Score Logs Report';
   doc.text(title, textStartX, 56);
 
   doc.setFontSize(8.5);

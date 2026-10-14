@@ -51,7 +51,7 @@ export default function LeaderboardModal({ onClose }: Props) {
         <div className="relative w-full overflow-hidden flex-shrink-0">
           <img
             src={`${basePath}/leaderboard_header.png`}
-            alt="Hall of Fame - Elephant House AR Tongue Catch Leaders"
+            alt="Hall of Fame - Sampath Bat AR Cricket Catch Leaders"
             className="w-full h-auto object-cover select-none pointer-events-none block"
           />
 

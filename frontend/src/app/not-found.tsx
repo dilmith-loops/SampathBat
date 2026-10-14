@@ -65,7 +65,7 @@ export default function NotFound() {
 
         {/* Brand Footer */}
         <p className="text-[11px] text-slate-500 mt-8 pt-6 border-t border-slate-800/80">
-          Elephant House Ice Cream AR Tongue Catch Experience
+          Elephant House Ice Cream & Sampath Bat AR Experience
         </p>
       </div>
     </main>

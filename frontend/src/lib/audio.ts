@@ -227,6 +227,86 @@ class SoundFX {
     osc2.stop(now + 0.15);
   }
 
+  // --- Cricket Bat Acoustic Strike & Whoosh FX ---
+  public playBatHit(isSweetSpot: boolean = false, points: number = 1) {
+    if (this.isMuted) return;
+    this.init();
+    if (!this.ctx) return;
+
+    const now = this.ctx.currentTime;
+
+    // 1. Wood Impact Snap (crisp transient crack)
+    const impactOsc = this.ctx.createOscillator();
+    const impactGain = this.ctx.createGain();
+    impactOsc.type = 'triangle';
+    impactOsc.frequency.setValueAtTime(isSweetSpot ? 980 : 720, now);
+    impactOsc.frequency.exponentialRampToValueAtTime(140, now + 0.08);
+
+    impactGain.gain.setValueAtTime(isSweetSpot ? 0.45 : 0.35, now);
+    impactGain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+
+    impactOsc.connect(impactGain);
+    impactGain.connect(this.ctx.destination);
+    impactOsc.start(now);
+    impactOsc.stop(now + 0.09);
+
+    // 2. English Willow Wood Resonance Ping ("Thock" body)
+    const woodOsc = this.ctx.createOscillator();
+    const woodGain = this.ctx.createGain();
+    woodOsc.type = 'sine';
+    const woodFreq = isSweetSpot ? 440 : 330;
+    woodOsc.frequency.setValueAtTime(woodFreq, now);
+    woodOsc.frequency.exponentialRampToValueAtTime(woodFreq * 1.3, now + 0.14);
+
+    woodGain.gain.setValueAtTime(0.3, now);
+    woodGain.gain.exponentialRampToValueAtTime(0.001, now + (isSweetSpot ? 0.22 : 0.16));
+
+    woodOsc.connect(woodGain);
+    woodGain.connect(this.ctx.destination);
+    woodOsc.start(now);
+    woodOsc.stop(now + (isSweetSpot ? 0.22 : 0.16));
+
+    // 3. Celebratory Reward Chime for Sweet Spot or High Marks
+    if (isSweetSpot || points > 1) {
+      const chimeOsc = this.ctx.createOscillator();
+      const chimeGain = this.ctx.createGain();
+      chimeOsc.type = 'sine';
+      chimeOsc.frequency.setValueAtTime(isSweetSpot ? 880 : 659.25, now + 0.03);
+      chimeOsc.frequency.exponentialRampToValueAtTime(1318.5, now + 0.24);
+
+      chimeGain.gain.setValueAtTime(0.25, now + 0.03);
+      chimeGain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+
+      chimeOsc.connect(chimeGain);
+      chimeGain.connect(this.ctx.destination);
+      chimeOsc.start(now + 0.03);
+      chimeOsc.stop(now + 0.28);
+    }
+  }
+
+  public playSwingWhoosh() {
+    if (this.isMuted) return;
+    this.init();
+    if (!this.ctx) return;
+
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(260, now);
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.07);
+    osc.frequency.exponentialRampToValueAtTime(180, now + 0.15);
+
+    gain.gain.setValueAtTime(0.08, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
+
   public playCombo(comboCount: number) {
     if (this.isMuted) return;
     this.init();

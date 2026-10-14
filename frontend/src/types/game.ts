@@ -118,6 +118,27 @@ export interface FaceMouthState {
   rawLandmarks?: Array<{ x: number; y: number; z: number }>;
 }
 
+export interface CricketBatState {
+  isDetected: boolean;
+  gripX: number;
+  gripY: number;
+  tipX: number;
+  tipY: number;
+  centerX: number;
+  centerY: number;
+  angle: number; // In radians
+  batLength: number;
+  batWidth: number;
+  vx: number;
+  vy: number;
+  swingSpeed: number;
+  detectionSource: 'physical_bat' | 'pose_grip' | 'mouse_touch';
+  confidence: number;
+  isSwinging: boolean;
+  lastHitTime: number;
+  recentPositions?: Array<{ x: number; y: number; angle: number; time: number }>;
+}
+
 export interface AdminStats {
   total_users: number;
   total_games: number;

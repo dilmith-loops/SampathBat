@@ -49,10 +49,10 @@ export default function PrivacyPage() {
             </div>
             <div>
               <h2 className="font-extrabold text-pink-200 text-base mb-1">
-                100% On-Device AR Face Tracking
+                100% On-Device AR Bat & Pose Tracking
               </h2>
               <p className="text-xs sm:text-sm text-pink-300/80 leading-relaxed">
-                Camera access is used to detect gameplay gestures, such as mouth-opening, required for the AR experience. Camera processing is performed in real time on your device. We do not record, store, upload, or share camera images, video, or facial geometry.
+                Camera access is used strictly to detect your cricket bat and batting gestures required for the interactive AR experience. All computer vision and AI processing is performed entirely in real time on your local device. We never record, store, upload, or transmit camera images or video frames.
               </p>
             </div>
           </div>

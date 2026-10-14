@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
-import { Player, PopsicleItem, SplashParticle, ScorePopup, FaceMouthState, PopsicleAsset, PopsicleType } from '../types/game';
+import { FilesetResolver, PoseLandmarker, ObjectDetector } from '@mediapipe/tasks-vision';
+import { Player, PopsicleItem, SplashParticle, ScorePopup, CricketBatState, PopsicleAsset, PopsicleType } from '../types/game';
 import { FLAVORS, drawPopsicle, preloadPopsicleImage } from '../lib/sprites';
 import { sound } from '../lib/audio';
 import { api, getPopsicleImageUrl } from '../lib/api';
@@ -33,6 +33,7 @@ import { generateAndShareScoreCard } from '../lib/shareCard';
 import SocialShareModal from './SocialShareModal';
 import StopwatchTimer from './StopwatchTimer';
 import { trackGAEvent } from '../lib/analytics';
+import { drawCricketBat, drawBatCrosshair } from '../lib/cricketBat';
 
 function SoftServeIcon({ className = 'w-6 h-6 sm:w-7 sm:h-7' }: { className?: string }) {
   return (
@@ -99,7 +100,8 @@ if (typeof window !== 'undefined') {
       (args[0].startsWith('INFO:') ||
         args[0].includes('TensorFlow Lite') ||
         args[0].includes('XNNPACK') ||
-        args[0].includes('face_landmarker'))
+        args[0].includes('pose_landmarker') ||
+        args[0].includes('object_detector'))
     ) {
       console.info(...args);
       return;
@@ -108,15 +110,25 @@ if (typeof window !== 'undefined') {
   };
 }
 
-// Global Singleton for FaceLandmarker to avoid React StrictMode double-mount destruction
-let globalLandmarker: FaceLandmarker | null = null;
-let globalLandmarkerPromise: Promise<FaceLandmarker> | null = null;
+// Global Singletons for Pose & Object Vision Models to prevent React StrictMode double-mount destruction
+let globalPoseLandmarker: PoseLandmarker | null = null;
+let globalObjectDetector: ObjectDetector | null = null;
+let globalVisionPromise: Promise<{
+  poseLandmarker: PoseLandmarker | null;
+  objectDetector: ObjectDetector | null;
+}> | null = null;
 
-async function getFaceLandmarker(): Promise<FaceLandmarker> {
-  if (globalLandmarker) return globalLandmarker;
-  const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-  if (!globalLandmarkerPromise) {
-    globalLandmarkerPromise = (async () => {
+async function getVisionModels(): Promise<{
+  poseLandmarker: PoseLandmarker | null;
+  objectDetector: ObjectDetector | null;
+}> {
+  if (globalPoseLandmarker || globalObjectDetector) {
+    return { poseLandmarker: globalPoseLandmarker, objectDetector: globalObjectDetector };
+  }
+
+  if (!globalVisionPromise) {
+    globalVisionPromise = (async () => {
+      const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
       let vision;
       try {
         vision = await FilesetResolver.forVisionTasks(`${basePath}/wasm`);
@@ -127,57 +139,95 @@ async function getFaceLandmarker(): Promise<FaceLandmarker> {
         );
       }
 
-      const modelUrls = [
-        `${basePath}/models/face_landmarker.task`,
-        'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+      // 1. Initialize PoseLandmarker (Batting stance and hand tracking)
+      const posePaths = [
+        `${basePath}/models/pose_landmarker_lite.task`,
+        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'
       ];
 
-      for (const modelPath of modelUrls) {
+      for (const modelPath of posePaths) {
         try {
-          globalLandmarker = await FaceLandmarker.createFromOptions(vision, {
+          globalPoseLandmarker = await PoseLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath: modelPath,
               delegate: 'GPU'
             },
             runningMode: 'VIDEO',
-            numFaces: 1,
-            minFaceDetectionConfidence: 0.5,
-            minFacePresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5,
-            outputFaceBlendshapes: false,
-            outputFacialTransformationMatrixes: false
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.4,
+            minPosePresenceConfidence: 0.4,
+            minTrackingConfidence: 0.4
           });
-          if (globalLandmarker) return globalLandmarker;
+          if (globalPoseLandmarker) break;
         } catch (gpuErr) {
-          console.warn(`GPU delegate failed for ${modelPath}, trying CPU:`, gpuErr);
+          console.warn(`GPU delegate failed for pose ${modelPath}, trying CPU:`, gpuErr);
           try {
-            globalLandmarker = await FaceLandmarker.createFromOptions(vision, {
+            globalPoseLandmarker = await PoseLandmarker.createFromOptions(vision, {
               baseOptions: {
                 modelAssetPath: modelPath,
                 delegate: 'CPU'
               },
               runningMode: 'VIDEO',
-              numFaces: 1,
-              minFaceDetectionConfidence: 0.5,
-              minFacePresenceConfidence: 0.5,
-              minTrackingConfidence: 0.5,
-              outputFaceBlendshapes: false,
-              outputFacialTransformationMatrixes: false
+              numPoses: 1,
+              minPoseDetectionConfidence: 0.4,
+              minPosePresenceConfidence: 0.4,
+              minTrackingConfidence: 0.4
             });
-            if (globalLandmarker) return globalLandmarker;
+            if (globalPoseLandmarker) break;
           } catch (cpuErr) {
-            console.warn(`CPU delegate failed for ${modelPath}:`, cpuErr);
+            console.warn(`CPU delegate failed for pose ${modelPath}:`, cpuErr);
           }
         }
       }
 
-      if (!globalLandmarker) {
-        throw new Error('Could not initialize FaceLandmarker on this device.');
+      // 2. Initialize ObjectDetector (Physical bat detection)
+      const detectorPaths = [
+        `${basePath}/models/efficientdet_lite0.tflite`,
+        'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite'
+      ];
+
+      for (const modelPath of detectorPaths) {
+        try {
+          globalObjectDetector = await ObjectDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: modelPath,
+              delegate: 'GPU'
+            },
+            runningMode: 'VIDEO',
+            scoreThreshold: 0.22,
+            maxResults: 4
+          });
+          if (globalObjectDetector) break;
+        } catch (gpuErr) {
+          try {
+            globalObjectDetector = await ObjectDetector.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: modelPath,
+                delegate: 'CPU'
+              },
+              runningMode: 'VIDEO',
+              scoreThreshold: 0.22,
+              maxResults: 4
+            });
+            if (globalObjectDetector) break;
+          } catch {
+            // continue to next path
+          }
+        }
       }
-      return globalLandmarker;
+
+      if (!globalPoseLandmarker && !globalObjectDetector) {
+        throw new Error('Could not initialize Bat AI models.');
+      }
+
+      return {
+        poseLandmarker: globalPoseLandmarker,
+        objectDetector: globalObjectDetector
+      };
     })();
   }
-  return globalLandmarkerPromise;
+
+  return globalVisionPromise;
 }
 
 export default function GameCanvas({
@@ -193,9 +243,7 @@ export default function GameCanvas({
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(3);
   const [isGameOver, setIsGameOver] = useState(false);
-  // Round score starts at 0 for each new game session
   const [score, setScore] = useState(0);
-  // Highest score (Personal Best) is safely retained and never amended with lower round scores
   const [highScore, setHighScore] = useState<number>(() => {
     let best = player.highest_score || 0;
     try {
@@ -214,15 +262,13 @@ export default function GameCanvas({
   const [combo, setCombo] = useState(0);
   const [maxCombo, setMaxCombo] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [isMouthOpen, setIsMouthOpen] = useState(false);
+  const [isBatDetected, setIsBatDetected] = useState(false);
   const [gameStartTime, setGameStartTime] = useState<number>(0);
   const [gameDuration, setGameDuration] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionResult, setSubmissionResult] = useState<{ rank?: number; personal_best?: number } | null>(null);
   const [showEndGameConfirm, setShowEndGameConfirm] = useState(false);
   const [isTabHidden, setIsTabHidden] = useState(false);
-  const [isSharing, setIsSharing] = useState(false);
-  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
   const [showSocialShareModal, setShowSocialShareModal] = useState(false);
   const [timerConfig, setTimerConfig] = useState<{ duration: number; enabled: boolean }>({ duration: 60, enabled: true });
   const [timeLeft, setTimeLeft] = useState<number>(60);
@@ -234,10 +280,12 @@ export default function GameCanvas({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
+  const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
+  const objectDetectorRef = useRef<ObjectDetector | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
   const lastVideoTimeRef = useRef<number>(-1);
   const lastDetectTimestampRef = useRef<number>(0);
+  const lastPointerTimeRef = useRef<number>(0);
   const pauseStartTimeRef = useRef<number>(0);
   const isPausedRef = useRef(isPaused || showEndGameConfirm || isTabHidden);
   isPausedRef.current = isPaused || showEndGameConfirm || isTabHidden;
@@ -246,14 +294,28 @@ export default function GameCanvas({
   const particlesRef = useRef<SplashParticle[]>([]);
   const scorePopupsRef = useRef<ScorePopup[]>([]);
   const lastSpawnTimeRef = useRef<number>(0);
-  const mouthStateRef = useRef<FaceMouthState>({
+
+  // Cricket Bat State Reference
+  const batStateRef = useRef<CricketBatState>({
     isDetected: false,
-    mouthCenter: { x: 0, y: 0 },
-    mouthWidth: 0,
-    mouthHeight: 0,
-    mar: 0,
-    isTongueOut: false
+    gripX: 0,
+    gripY: 0,
+    tipX: 0,
+    tipY: 0,
+    centerX: 0,
+    centerY: 0,
+    angle: 0,
+    batLength: 240,
+    batWidth: 54,
+    vx: 0,
+    vy: 0,
+    swingSpeed: 0,
+    detectionSource: 'pose_grip',
+    confidence: 0,
+    isSwinging: false,
+    lastHitTime: 0
   });
+
   const scoreRef = useRef(0);
   const highScoreRef = useRef<number>(highScore);
   highScoreRef.current = highScore;
@@ -261,18 +323,6 @@ export default function GameCanvas({
   const comboRef = useRef(0);
   const isGameOverRef = useRef(false);
   const popsicleAssetsRef = useRef<PopsicleAsset[]>([]);
-  const dogTongueImageRef = useRef<HTMLImageElement | null>(null);
-
-  // Preload Snapchat Dog Tongue AR Asset
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const img = new Image();
-      img.src = `${process.env.NEXT_PUBLIC_BASE_PATH || ''}/dog_tongue.png`;
-      img.onload = () => {
-        dogTongueImageRef.current = img;
-      };
-    }
-  }, []);
 
   // Sound toggle
   const toggleMute = () => {
@@ -287,7 +337,6 @@ export default function GameCanvas({
     api.getPopsicles().then((res) => {
       if (isMounted && res.success && res.popsicles && res.popsicles.length > 0) {
         popsicleAssetsRef.current = res.popsicles;
-        // Preload any custom uploaded images into canvas cache
         res.popsicles.forEach((p) => {
           const imgUrl = getPopsicleImageUrl(p.image_url);
           if (imgUrl) {
@@ -330,21 +379,22 @@ export default function GameCanvas({
     return () => clearInterval(interval);
   }, [player.id]);
 
-  // Initialize MediaPipe Face Landmarker via Singleton
+  // Initialize MediaPipe Bat & Pose AI Vision Models
   useEffect(() => {
     let isMounted = true;
 
-    getFaceLandmarker()
-      .then((landmarker) => {
+    getVisionModels()
+      .then(({ poseLandmarker, objectDetector }) => {
         if (isMounted) {
-          faceLandmarkerRef.current = landmarker;
+          poseLandmarkerRef.current = poseLandmarker;
+          objectDetectorRef.current = objectDetector;
           setLoadingAI(false);
         }
       })
       .catch((err) => {
-        console.error('Error initializing MediaPipe:', err);
+        console.error('Error initializing MediaPipe Bat Vision models:', err);
         if (isMounted) {
-          setCameraError('Face AI model could not be loaded. Please refresh the page.');
+          // Allow interactive mouse/touch fallback even if AI weights fail to download
           setLoadingAI(false);
         }
       });
@@ -364,17 +414,12 @@ export default function GameCanvas({
         setLoadingCamera(true);
         setCameraError(null);
 
-        // Check if mediaDevices is supported (requires HTTPS on mobile)
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           throw new Error('Camera requires HTTPS. Please access via secure https:// domain.');
         }
 
         const isMobile = typeof window !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-        const isInAppBrowser =
-          typeof window !== 'undefined' &&
-          /FBAN|FBAV|Instagram|TikTok|Line\/|MicroMessenger|Snapchat|Twitter|ByteLocale/i.test(navigator.userAgent);
 
-        // Stage 1: Optimal lightweight constraints (480p on mobile to prevent CPU/GPU bottleneck, 720p on desktop)
         try {
           stream = await navigator.mediaDevices.getUserMedia({
             video: isMobile
@@ -393,14 +438,12 @@ export default function GameCanvas({
             audio: false
           });
         } catch {
-          // Stage 2: Fallback to basic user camera constraint
           try {
             stream = await navigator.mediaDevices.getUserMedia({
               video: { facingMode: 'user' },
               audio: false
             });
           } catch {
-            // Stage 3: Universal fallback to any video input
             stream = await navigator.mediaDevices.getUserMedia({
               video: true,
               audio: false
@@ -445,7 +488,7 @@ export default function GameCanvas({
             );
           } else {
             setCameraError(
-              'Please allow front camera access in your browser settings to play the Tongue Catch game.'
+              'Please allow camera access in your browser settings to play the Cricket Bat Catch game.'
             );
           }
           setLoadingCamera(false);
@@ -491,56 +534,76 @@ export default function GameCanvas({
     }
   }, [countdown, loadingAI, loadingCamera, cameraError, isPaused]);
 
-  // Handle Score & Particles on Catch
-  const handleCatch = useCallback((popsicle: PopsicleItem, mouthPos: { x: number; y: number }) => {
-    const pts = popsicle.points || 1;
-    scoreRef.current += pts;
+  // Handle Score & Particles on Bat Catch
+  const handleCatch = useCallback((popsicle: PopsicleItem, hitPoint: { x: number; y: number }, isSweetSpot: boolean = false) => {
+    const basePts = popsicle.points || 1;
+    const bonusPts = isSweetSpot ? 2 : 0;
+    const totalPts = basePts + bonusPts;
+
+    scoreRef.current += totalPts;
     catchesRef.current += 1;
     comboRef.current += 1;
+    batStateRef.current.lastHitTime = performance.now();
 
     setScore(scoreRef.current);
     setCatches(catchesRef.current);
     setCombo(comboRef.current);
     setMaxCombo((prev) => Math.max(prev, comboRef.current));
 
-    // Sound effect
-    if (popsicle.type === 'golden_star' || pts >= 3) {
-      sound.playGoldenCatch();
-    } else if (comboRef.current > 2 && comboRef.current % 3 === 0) {
-      sound.playCombo(comboRef.current);
-    } else {
-      sound.playCatch(pts);
+    // Acoustic Sound effect: Cricket Bat Impact & Resonance!
+    sound.playBatHit(isSweetSpot, totalPts);
+
+    // If sweet spot, fire celebratory mini confetti!
+    if (isSweetSpot) {
+      confetti({
+        particleCount: 22,
+        spread: 55,
+        origin: {
+          x: hitPoint.x / window.innerWidth,
+          y: hitPoint.y / window.innerHeight
+        },
+        colors: ['#F59E0B', '#EF4444', '#10B981', '#3B82F6']
+      });
     }
 
-    // Spawn Juicy Splash Particles using custom colors
+    // Spawn Juicy Splash & Spark Particles
     const pColor = popsicle.color || '#E91E63';
     const sColor = popsicle.secondaryColor || '#FFD200';
-    const particleColors = [pColor, sColor, '#FFFFFF', '#FFEB3B'];
-    for (let i = 0; i < 18; i++) {
+    const particleColors = isSweetSpot
+      ? ['#F59E0B', '#FFF', '#FDE047', pColor]
+      : [pColor, sColor, '#FFFFFF', '#FFEB3B'];
+
+    for (let i = 0; i < (isSweetSpot ? 22 : 16); i++) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = 2 + Math.random() * 6;
+      const speed = (isSweetSpot ? 3.5 : 2) + Math.random() * 6.5;
       particlesRef.current.push({
-        x: mouthPos.x,
-        y: mouthPos.y,
+        x: hitPoint.x,
+        y: hitPoint.y,
         vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 1.5,
+        vy: Math.sin(angle) * speed - 2.2,
         size: 3 + Math.random() * 5,
         color: particleColors[Math.floor(Math.random() * particleColors.length)],
         alpha: 1,
-        decay: 0.02 + Math.random() * 0.03
+        decay: 0.02 + Math.random() * 0.025
       });
     }
 
     // Spawn Score Popup
-    const nameLabel = popsicle.flavorName || 'Popsicle';
-    const popupText = pts > 1 ? `+${pts} ${nameLabel}!` : comboRef.current > 3 ? `+${pts} (${comboRef.current}x Combo!)` : `+${pts} Marks!`;
+    const nameLabel = popsicle.flavorName || 'Ice Cream';
+    let popupText = `+${totalPts} ${nameLabel}!`;
+    if (isSweetSpot) {
+      popupText = `⚡ SWEET SPOT! +${totalPts} RUNS!`;
+    } else if (comboRef.current > 3) {
+      popupText = `🏏 +${totalPts} (${comboRef.current}x STREAK!)`;
+    }
+
     scorePopupsRef.current.push({
-      x: mouthPos.x,
-      y: mouthPos.y - 20,
+      x: hitPoint.x,
+      y: hitPoint.y - 25,
       text: popupText,
-      color: pColor,
+      color: isSweetSpot ? '#F59E0B' : pColor,
       alpha: 1,
-      vy: -2.2
+      vy: -2.4
     });
   }, []);
 
@@ -589,7 +652,6 @@ export default function GameCanvas({
         personal_best: res.personal_best
       });
       const apiBest = typeof res.personal_best === 'number' ? res.personal_best : 0;
-      // High score ONLY changes if roundScore or apiBest is strictly greater than previous high score!
       const newHigh = Math.max(previousHigh, roundScore, apiBest);
       setHighScore(newHigh);
       highScoreRef.current = newHigh;
@@ -613,7 +675,6 @@ export default function GameCanvas({
       onEndGame(roundScore, newHigh);
     } finally {
       setIsSubmitting(false);
-      // Fetch latest Top 3 Players for Game Finished dialog
       setLoadingTopThree(true);
       api.getLeaderboard(3)
         .then((lbRes) => {
@@ -630,7 +691,7 @@ export default function GameCanvas({
     }
   }, [gameStartTime, onEndGame, player]);
 
-  // Session Countdown Timer (runs when countdown is over, not paused, and not game over)
+  // Session Countdown Timer
   useEffect(() => {
     if (countdown !== null || isGameOver || isPaused || showEndGameConfirm || isTabHidden || !timerConfig.enabled) {
       return;
@@ -656,14 +717,14 @@ export default function GameCanvas({
     return () => clearInterval(timerInterval);
   }, [countdown, isGameOver, isPaused, showEndGameConfirm, isTabHidden, timerConfig.enabled, isMuted, endGame]);
 
-  // Request End Game (Pauses gameplay & opens custom confirmation dialog)
+  // Request End Game
   const handleRequestEndGame = () => {
     if (countdown !== null || isGameOver) return;
     pauseStartTimeRef.current = Date.now();
     setShowEndGameConfirm(true);
   };
 
-  // Resume Game from End Game Dialog
+  // Resume Game
   const handleResumeGame = () => {
     if (pauseStartTimeRef.current > 0) {
       const pausedDuration = Date.now() - pauseStartTimeRef.current;
@@ -673,7 +734,7 @@ export default function GameCanvas({
     setShowEndGameConfirm(false);
   };
 
-  // Resume Game from Browser Minimize / Auto-Pause
+  // Resume Game from Tab
   const handleResumeFromTab = () => {
     if (pauseStartTimeRef.current > 0) {
       const pausedDuration = Date.now() - pauseStartTimeRef.current;
@@ -686,13 +747,13 @@ export default function GameCanvas({
     setIsTabHidden(false);
   };
 
-  // Confirm End Game & Submit Score
+  // Confirm End Game
   const handleConfirmEndGame = () => {
     setShowEndGameConfirm(false);
     endGame();
   };
 
-  // Auto-pause when browser tab is minimized, switched, or window blurred
+  // Auto-pause when tab is hidden or window blurred
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.hidden || document.visibilityState === 'hidden') {
@@ -723,7 +784,7 @@ export default function GameCanvas({
     };
   }, [countdown, isGameOver]);
 
-  // Sync background music with pause & active game states
+  // Sync background music
   useEffect(() => {
     if (countdown !== null || isGameOver) return;
     if (isPaused || showEndGameConfirm || isTabHidden) {
@@ -733,12 +794,57 @@ export default function GameCanvas({
     }
   }, [isPaused, showEndGameConfirm, isTabHidden, countdown, isGameOver]);
 
-  // Cleanup BGM on unmount
   useEffect(() => {
     return () => {
       sound.stopBGM();
     };
   }, []);
+
+  // Pointer / Touch fallback & interactive bat movement
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+
+    lastPointerTimeRef.current = performance.now();
+    const batL = Math.max(190, Math.min(280, rect.height * 0.42));
+    const batW = Math.max(46, Math.min(64, batL * 0.22));
+
+    const centerDiff = (px - rect.width * 0.5) / (rect.width * 0.5);
+    const angle = Math.max(-0.65, Math.min(0.65, centerDiff * 0.45));
+    const gripX = px;
+    const gripY = py + batL * 0.28;
+    const tipX = gripX - Math.sin(angle) * batL;
+    const tipY = gripY - Math.cos(angle) * batL;
+
+    const prev = batStateRef.current;
+    const vx = gripX - prev.gripX;
+    const vy = gripY - prev.gripY;
+    const swingSpeed = Math.hypot(vx, vy) * 30;
+
+    batStateRef.current = {
+      isDetected: true,
+      gripX,
+      gripY,
+      tipX,
+      tipY,
+      centerX: (gripX + tipX) * 0.5,
+      centerY: (gripY + tipY) * 0.5,
+      angle,
+      batLength: batL,
+      batWidth: batW,
+      vx,
+      vy,
+      swingSpeed,
+      detectionSource: 'mouse_touch',
+      confidence: 1.0,
+      isSwinging: swingSpeed > 350,
+      lastHitTime: prev.lastHitTime
+    };
+    setIsBatDetected(true);
+  };
 
   // Main AR Canvas Game Loop
   useEffect(() => {
@@ -757,10 +863,8 @@ export default function GameCanvas({
       const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
       lastTime = timestamp;
 
-      // Check if paused
       const currentlyPaused = isPausedRef.current;
 
-      // Dynamic screen-adaptive canvas sizing
       const rect = container.getBoundingClientRect();
       const screenW = rect.width || window.innerWidth;
       const screenH = rect.height || window.innerHeight;
@@ -773,10 +877,9 @@ export default function GameCanvas({
       const width = canvas.width;
       const height = canvas.height;
 
-      // Always clear the canvas before drawing frame to eliminate any streaking/trails
       ctx.clearRect(0, 0, width, height);
 
-      // Calculate object-fit: cover transform for portrait camera feed
+      // Object-fit: cover mapping for portrait camera feed
       const videoW = video.videoWidth || 1280;
       const videoH = video.videoHeight || 720;
       const videoAspect = videoW / videoH;
@@ -799,19 +902,12 @@ export default function GameCanvas({
         offsetY = (height - renderH) / 2;
       }
 
-      // Note: Video frame is rendered directly by GPU hardware via the native <video> tag behind the transparent canvas!
-      // This eliminates 100% of the canvas drawImage video copy lag on mobile devices.
-
-      // Adaptive FaceLandmarker detection interval:
-      // Mobile (~19 FPS / 52ms interval) prevents mobile CPU overheating & frame stutter while LERP keeps cursor silky-smooth at 60 FPS
-      // Desktop (~26 FPS / 38ms interval)
-      const landmarker = faceLandmarkerRef.current || globalLandmarker;
+      // Detection Interval
       const isMobileDev = typeof window !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-      const detectInterval = isMobileDev ? 52 : 38;
+      const detectInterval = isMobileDev ? 50 : 35;
 
       if (
         !currentlyPaused &&
-        landmarker &&
         video.readyState >= 2 &&
         video.currentTime !== lastVideoTimeRef.current &&
         timestamp - lastDetectTimestampRef.current >= detectInterval
@@ -819,168 +915,192 @@ export default function GameCanvas({
         lastDetectTimestampRef.current = timestamp;
         lastVideoTimeRef.current = video.currentTime;
 
-        try {
-          const results = landmarker.detectForVideo(video, timestamp);
-          if (results.faceLandmarks && results.faceLandmarks.length > 0) {
-            const landmarks = results.faceLandmarks[0];
+        let candidateBat: {
+          gripX: number;
+          gripY: number;
+          tipX: number;
+          tipY: number;
+          angle: number;
+          source: 'physical_bat' | 'pose_grip' | 'mouse_touch';
+          confidence: number;
+        } | null = null;
 
-            // Upper lip = 13, Lower lip = 14, Left corner = 78, Right corner = 308
-            const upperLip = landmarks[13];
-            const lowerLip = landmarks[14];
-            const leftCorner = landmarks[78];
-            const rightCorner = landmarks[308];
+        // 1. Check Physical Object Detection (Real Bat / Racket / Elongated Object)
+        if (objectDetectorRef.current) {
+          try {
+            const objResults = objectDetectorRef.current.detectForVideo(video, timestamp);
+            if (objResults.detections && objResults.detections.length > 0) {
+              for (const det of objResults.detections) {
+                const matchCat = det.categories.find(
+                  (c) =>
+                    (c.categoryName === 'baseball bat' ||
+                      c.categoryName === 'tennis racket' ||
+                      c.categoryName === 'sports ball' ||
+                      c.categoryName === 'bottle') &&
+                    c.score > 0.22
+                );
+                if (matchCat && det.boundingBox) {
+                  const bb = det.boundingBox;
+                  const rawCx = (bb.originX + bb.width * 0.5) / (video.videoWidth || 1280);
+                  const rawCy = (bb.originY + bb.height * 0.5) / (video.videoHeight || 720);
+                  const cx = (1 - rawCx) * renderW + offsetX;
+                  const cy = rawCy * renderH + offsetY;
+                  const batL = Math.max(200, Math.min(320, (bb.height / (video.videoHeight || 720)) * renderH * 1.3));
 
-            const rawVx = (upperLip.x + lowerLip.x) / 2;
-            const rawVy = (upperLip.y + lowerLip.y) / 2;
-            const targetMouthX = (1 - rawVx) * renderW + offsetX;
-            const targetMouthY = rawVy * renderH + offsetY;
-
-            // Calculate mouth corner coords for tilt angle
-            const cornerLeftX = (1 - leftCorner.x) * renderW + offsetX;
-            const cornerLeftY = leftCorner.y * renderH + offsetY;
-            const cornerRightX = (1 - rightCorner.x) * renderW + offsetX;
-            const cornerRightY = rightCorner.y * renderH + offsetY;
-
-            // Roll angle (tilt) of mouth in mirrored canvas space
-            // In mirrored coords: cornerRightX is on the left of screen, cornerLeftX is on the right
-            const dx = cornerLeftX - cornerRightX;
-            const dy = cornerLeftY - cornerRightY;
-            let targetAngle = Math.atan2(dy, dx);
-            // Clamp tilt between -32 deg and +32 deg (~0.55 rad) to prevent any inversion
-            targetAngle = Math.max(-0.55, Math.min(0.55, targetAngle));
-
-            const lipDistanceY = Math.abs(lowerLip.y - upperLip.y) * renderH;
-            const lipDistanceX = Math.hypot(cornerRightX - cornerLeftX, cornerRightY - cornerLeftY);
-            const mar = lipDistanceY / (lipDistanceX || 1);
-
-            // Responsive mouth/tongue open threshold
-            const open = mar > 0.22 || lipDistanceY > 16;
-            setIsMouthOpen(open);
-
-            // Smooth linear interpolation (LERP) for jitter-free tracking
-            const prevMouth = mouthStateRef.current;
-            const lerpFactor = isMobileDev ? 0.55 : 0.65;
-            const smoothX = prevMouth.isDetected
-              ? prevMouth.mouthCenter.x + (targetMouthX - prevMouth.mouthCenter.x) * lerpFactor
-              : targetMouthX;
-            const smoothY = prevMouth.isDetected
-              ? prevMouth.mouthCenter.y + (targetMouthY - prevMouth.mouthCenter.y) * lerpFactor
-              : targetMouthY;
-            const smoothAngle = prevMouth.isDetected && prevMouth.mouthAngle !== undefined
-              ? prevMouth.mouthAngle + (targetAngle - prevMouth.mouthAngle) * 0.45
-              : targetAngle;
-
-            // Calculate cute, natural puppy tongue dimensions (compact & proportional to mouth)
-            const baseTongueW = Math.max(46, Math.min(70, (lipDistanceX || 40) * 1.1));
-            const stretchFactor = Math.min(1.22, Math.max(0.92, 0.88 + mar * 0.7));
-            const dynamicTongueH = baseTongueW * 1.25 * stretchFactor;
-
-            // Tip location along the mouth tilt vector (hanging DOWNWARDS past the lower lip)
-            const tipX = smoothX - Math.sin(smoothAngle) * (dynamicTongueH * 0.78);
-            const tipY = smoothY + Math.cos(smoothAngle) * (dynamicTongueH * 0.78);
-
-            mouthStateRef.current = {
-              isDetected: true,
-              mouthCenter: { x: smoothX, y: smoothY },
-              mouthWidth: lipDistanceX,
-              mouthHeight: lipDistanceY,
-              mar: mar,
-              isTongueOut: open,
-              mouthAngle: smoothAngle,
-              tongueHeight: dynamicTongueH,
-              tongueTip: { x: tipX, y: tipY }
-            };
-          } else {
-            mouthStateRef.current.isDetected = false;
-            setIsMouthOpen(false);
+                  candidateBat = {
+                    gripX: cx,
+                    gripY: cy + batL * 0.38,
+                    tipX: cx,
+                    tipY: cy - batL * 0.62,
+                    angle: 0,
+                    source: 'physical_bat',
+                    confidence: matchCat.score
+                  };
+                  break;
+                }
+              }
+            }
+          } catch {
+            // frame drop handled
           }
-        } catch {
-          // frame drops gracefully handled
+        }
+
+        // 2. Check Pose / Hand Grip Tracking (Batting stance with hands)
+        if (poseLandmarkerRef.current) {
+          try {
+            const poseResults = poseLandmarkerRef.current.detectForVideo(video, timestamp);
+            if (poseResults.landmarks && poseResults.landmarks.length > 0) {
+              const lm = poseResults.landmarks[0];
+              const wL = lm[15]; // left wrist
+              const wR = lm[16]; // right wrist
+              const eL = lm[13]; // left elbow
+              const eR = lm[14]; // right elbow
+
+              const wLVis = wL ? (wL.visibility ?? 1) : 0;
+              const wRVis = wR ? (wR.visibility ?? 1) : 0;
+
+              if (wL && wR && (wLVis > 0.28 || wRVis > 0.28)) {
+                let rawGx = 0;
+                let rawGy = 0;
+                if (wLVis > 0.28 && wRVis > 0.28) {
+                  rawGx = (wL.x + wR.x) * 0.5;
+                  rawGy = (wL.y + wR.y) * 0.5;
+                } else if (wLVis > 0.28) {
+                  rawGx = wL.x;
+                  rawGy = wL.y;
+                } else {
+                  rawGx = wR.x;
+                  rawGy = wR.y;
+                }
+
+                const targetGripX = (1 - rawGx) * renderW + offsetX;
+                const targetGripY = rawGy * renderH + offsetY;
+
+                // Bat angle calculation from hand orientation
+                const handDx = (1 - wR.x) - (1 - wL.x);
+                const handDy = wR.y - wL.y;
+
+                let targetAngle = 0;
+                if (wLVis > 0.35 && wRVis > 0.35 && Math.hypot(handDx, handDy) > 0.03) {
+                  targetAngle = Math.atan2(handDy, handDx) - Math.PI / 2;
+                } else if (eL && eR) {
+                  const rawEx = (eL.x + eR.x) * 0.5;
+                  const rawEy = (eL.y + eR.y) * 0.5;
+                  const elbowX = (1 - rawEx) * renderW + offsetX;
+                  const elbowY = rawEy * renderH + offsetY;
+                  const armDx = targetGripX - elbowX;
+                  const armDy = targetGripY - elbowY;
+                  targetAngle = Math.atan2(armDx, -armDy);
+                }
+
+                targetAngle = Math.max(-1.1, Math.min(1.1, targetAngle));
+
+                const batL = Math.max(190, Math.min(290, renderH * 0.42));
+                const tipX = targetGripX - Math.sin(targetAngle) * batL;
+                const tipY = targetGripY - Math.cos(targetAngle) * batL;
+
+                if (!candidateBat) {
+                  candidateBat = {
+                    gripX: targetGripX,
+                    gripY: targetGripY,
+                    tipX,
+                    tipY,
+                    angle: targetAngle,
+                    source: 'pose_grip',
+                    confidence: Math.max(wLVis, wRVis)
+                  };
+                } else {
+                  // Harmonize physical bat position with player's hands
+                  candidateBat.gripX = targetGripX;
+                  candidateBat.gripY = targetGripY;
+                  candidateBat.angle = targetAngle;
+                  candidateBat.tipX = tipX;
+                  candidateBat.tipY = tipY;
+                }
+              }
+            }
+          } catch {
+            // frame drop handled
+          }
+        }
+
+        // Smooth LERP integration
+        if (candidateBat) {
+          const prev = batStateRef.current;
+          const lerpFactor = isMobileDev ? 0.55 : 0.65;
+          const smoothGripX = prev.isDetected ? prev.gripX + (candidateBat.gripX - prev.gripX) * lerpFactor : candidateBat.gripX;
+          const smoothGripY = prev.isDetected ? prev.gripY + (candidateBat.gripY - prev.gripY) * lerpFactor : candidateBat.gripY;
+          const smoothAngle = prev.isDetected ? prev.angle + (candidateBat.angle - prev.angle) * 0.45 : candidateBat.angle;
+
+          const batL = Math.max(190, Math.min(290, renderH * 0.42));
+          const batW = Math.max(46, Math.min(66, batL * 0.22));
+          const smoothTipX = smoothGripX - Math.sin(smoothAngle) * batL;
+          const smoothTipY = smoothGripY - Math.cos(smoothAngle) * batL;
+
+          const frameDt = Math.max(0.016, (timestamp - lastDetectTimestampRef.current) / 1000);
+          const vx = (smoothGripX - prev.gripX) / frameDt;
+          const vy = (smoothGripY - prev.gripY) / frameDt;
+          const swingSpeed = Math.hypot(vx, vy);
+
+          if (swingSpeed > 450 && !prev.isSwinging) {
+            sound.playSwingWhoosh();
+          }
+
+          batStateRef.current = {
+            isDetected: true,
+            gripX: smoothGripX,
+            gripY: smoothGripY,
+            tipX: smoothTipX,
+            tipY: smoothTipY,
+            centerX: (smoothGripX + smoothTipX) * 0.5,
+            centerY: (smoothGripY + smoothTipY) * 0.5,
+            angle: smoothAngle,
+            batLength: batL,
+            batWidth: batW,
+            vx,
+            vy,
+            swingSpeed,
+            detectionSource: candidateBat.source,
+            confidence: candidateBat.confidence,
+            isSwinging: swingSpeed > 350,
+            lastHitTime: prev.lastHitTime
+          };
+          setIsBatDetected(true);
+        } else {
+          // If neither camera nor recent pointer interaction detected:
+          if (timestamp - lastPointerTimeRef.current > 2000) {
+            batStateRef.current.isDetected = false;
+            setIsBatDetected(false);
+          }
         }
       }
 
-      // Draw Mouth Target / Snapchat Dog Tongue Filter if detected
-      const mouth = mouthStateRef.current;
-      if (mouth.isDetected && !currentlyPaused) {
-        ctx.save();
-        if (mouth.isTongueOut) {
-          const tx = mouth.mouthCenter.x;
-          const ty = mouth.mouthCenter.y;
-          const headAngle = mouth.mouthAngle || 0;
-
-          // Organic floppy tongue waggle & spring animation
-          const waggle = Math.sin(timestamp * 0.012) * 0.035;
-          const bounce = Math.sin(timestamp * 0.018) * 1.8;
-          const tongueW = mouth.mouthWidth ? Math.max(46, Math.min(70, mouth.mouthWidth * 1.1)) : 56;
-          const tongueH = (mouth.tongueHeight || tongueW * 1.25) + bounce;
-
-          ctx.translate(tx, ty);
-          ctx.rotate(headAngle + waggle);
-
-          if (dogTongueImageRef.current && dogTongueImageRef.current.complete && dogTongueImageRef.current.naturalWidth > 0) {
-            // Render 3D glossy puppy tongue with realistic depth shadow
-            ctx.shadowColor = 'rgba(0, 0, 0, 0.32)';
-            ctx.shadowBlur = 10;
-            ctx.shadowOffsetY = 4;
-            ctx.drawImage(
-              dogTongueImageRef.current,
-              -tongueW * 0.5,
-              -tongueH * 0.08, // Root starts smoothly inside the lips
-              tongueW,
-              tongueH
-            );
-          } else {
-            // High-definition glossy vector fallback
-            const fallbackH = tongueH;
-            ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
-            ctx.shadowBlur = 8;
-            ctx.shadowOffsetY = 4;
-
-            ctx.beginPath();
-            ctx.moveTo(-tongueW * 0.45, -fallbackH * 0.05);
-            ctx.bezierCurveTo(
-              -tongueW * 0.55, fallbackH * 0.45,
-              -tongueW * 0.4, fallbackH,
-              0, fallbackH
-            );
-            ctx.bezierCurveTo(
-              tongueW * 0.4, fallbackH,
-              tongueW * 0.55, fallbackH * 0.45,
-              tongueW * 0.45, -fallbackH * 0.05
-            );
-            ctx.closePath();
-
-            const tongueGrad = ctx.createLinearGradient(0, 0, 0, fallbackH);
-            tongueGrad.addColorStop(0, '#FF4081');
-            tongueGrad.addColorStop(0.5, '#F50057');
-            tongueGrad.addColorStop(1, '#C2185B');
-            ctx.fillStyle = tongueGrad;
-            ctx.fill();
-
-            // Central groove line
-            ctx.beginPath();
-            ctx.moveTo(0, fallbackH * 0.05);
-            ctx.lineTo(0, fallbackH * 0.82);
-            ctx.lineWidth = 2.5;
-            ctx.strokeStyle = 'rgba(136, 14, 79, 0.45)';
-            ctx.stroke();
-
-            // Specular highlight shine
-            ctx.beginPath();
-            ctx.ellipse(-tongueW * 0.18, fallbackH * 0.35, tongueW * 0.12, fallbackH * 0.22, -0.1, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-            ctx.fill();
-          }
-        } else {
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
-          ctx.lineWidth = 2;
-          ctx.setLineDash([5, 4]);
-          ctx.beginPath();
-          ctx.arc(mouth.mouthCenter.x, mouth.mouthCenter.y + 4, 26, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-        ctx.restore();
+      // Draw Cricket Bat or Searching Reticle
+      const bat = batStateRef.current;
+      if (bat.isDetected && !currentlyPaused) {
+        drawCricketBat(ctx, bat, timestamp);
+      } else if (!currentlyPaused && countdown === null) {
+        drawBatCrosshair(ctx, width, height);
       }
 
       // Spawn Falling Popsicles (Only when NOT paused)
@@ -994,7 +1114,6 @@ export default function GameCanvas({
 
         const dynamicAssets = popsicleAssetsRef.current;
         if (dynamicAssets && dynamicAssets.length > 0) {
-          // Weighted random selection
           const totalWeight = dynamicAssets.reduce((sum, item) => sum + (item.spawn_weight || 1), 0);
           let randomWeight = Math.random() * totalWeight;
           let chosen = dynamicAssets[0];
@@ -1026,7 +1145,6 @@ export default function GameCanvas({
             imageUrl: getPopsicleImageUrl(chosen.image_url)
           });
         } else {
-          // Preset Fallback
           const rand = Math.random();
           let flavorType: keyof typeof FLAVORS = 'chocobar';
           if (rand < 0.28) flavorType = 'chocobar';
@@ -1056,7 +1174,7 @@ export default function GameCanvas({
         }
       }
 
-      // Update & Draw Popsicles
+      // Update & Draw Popsicles with Bat Collision
       for (let i = popsiclesRef.current.length - 1; i >= 0; i--) {
         const item = popsiclesRef.current[i];
 
@@ -1064,53 +1182,44 @@ export default function GameCanvas({
           item.y += item.speed * dt;
           item.rotation += item.rotationSpeed * dt;
 
-          // Precise Physical Tongue Contact Check: ONLY eats when ice cream directly touches the tongue!
-          if (!item.caught && mouth.isDetected && mouth.isTongueOut) {
-            const tongueW = mouth.mouthWidth ? Math.max(46, Math.min(70, mouth.mouthWidth * 1.1)) : 56;
-            const tongueH = mouth.tongueHeight || (tongueW * 1.25);
-            const headAngle = mouth.mouthAngle || 0;
+          // Cricket Bat Collision Check
+          if (!item.caught && bat.isDetected) {
+            // Bat blade begins ~26% from handle base to tip (100%)
+            const shoulderX = bat.gripX + (bat.tipX - bat.gripX) * 0.26;
+            const shoulderY = bat.gripY + (bat.tipY - bat.gripY) * 0.26;
+            const bladeDx = bat.tipX - shoulderX;
+            const bladeDy = bat.tipY - shoulderY;
+            const bladeLenSq = bladeDx * bladeDx + bladeDy * bladeDy;
 
-            // Tongue segment from mouth root to extended floppy tip
-            const p0x = mouth.mouthCenter.x;
-            const p0y = mouth.mouthCenter.y;
-            const p1x = p0x - Math.sin(headAngle) * (tongueH * 0.82);
-            const p1y = p0y + Math.cos(headAngle) * (tongueH * 0.82);
+            if (bladeLenSq > 0) {
+              const tCenter = ((item.x - shoulderX) * bladeDx + (item.y - shoulderY) * bladeDy) / bladeLenSq;
+              const clampedTCenter = Math.max(0, Math.min(1, tCenter));
+              const closestCenterX = shoulderX + clampedTCenter * bladeDx;
+              const closestCenterY = shoulderY + clampedTCenter * bladeDy;
+              const distCenter = Math.hypot(item.x - closestCenterX, item.y - closestCenterY);
 
-            // Vector along tongue spine
-            const vx = p1x - p0x;
-            const vy = p1y - p0y;
-            const vLenSq = vx * vx + vy * vy;
+              const popBottomY = item.y + item.size * 0.28;
+              const tBottom = ((item.x - shoulderX) * bladeDx + (popBottomY - shoulderY) * bladeDy) / bladeLenSq;
+              const clampedTBottom = Math.max(0, Math.min(1, tBottom));
+              const closestBottomX = shoulderX + clampedTBottom * bladeDx;
+              const closestBottomY = shoulderY + clampedTBottom * bladeDy;
+              const distBottom = Math.hypot(item.x - closestBottomX, popBottomY - closestBottomY);
 
-            // Compute distance from point to tongue spine
-            const getTongueContact = (px: number, py: number) => {
-              if (vLenSq === 0) return { dist: Math.hypot(px - p0x, py - p0y), cx: p0x, cy: p0y };
-              const t = Math.max(0, Math.min(1, ((px - p0x) * vx + (py - p0y) * vy) / vLenSq));
-              const cx = p0x + t * vx;
-              const cy = p0y + t * vy;
-              return { dist: Math.hypot(px - cx, py - cy), cx, cy };
-            };
+              const minDist = Math.min(distCenter, distBottom);
+              const hitThreshold = (bat.batWidth * 0.55) + (item.size * 0.32);
 
-            // Test popsicle bottom contact point and center point
-            const popsicleBottomY = item.y + (item.size * 0.28);
-            const hitBottom = getTongueContact(item.x, popsicleBottomY);
-            const hitCenter = getTongueContact(item.x, item.y);
+              if (minDist <= hitThreshold) {
+                item.caught = true;
+                const hitPoint = distCenter <= distBottom
+                  ? { x: closestCenterX, y: closestCenterY }
+                  : { x: closestBottomX, y: closestBottomY };
+                const chosenT = distCenter <= distBottom ? clampedTCenter : clampedTBottom;
+                const isSweetSpot = chosenT >= 0.42 && chosenT <= 0.85;
 
-            // Physical collision boundary: tongue radius + popsicle radius
-            const tongueRadius = tongueW * 0.44;
-            const popsicleRadius = item.size * 0.26;
-            const contactThreshold = tongueRadius + popsicleRadius;
-
-            const isTouchingTongue = hitBottom.dist <= contactThreshold || hitCenter.dist <= contactThreshold;
-
-            if (isTouchingTongue) {
-              item.caught = true;
-              const contactPoint = hitBottom.dist <= hitCenter.dist
-                ? { x: hitBottom.cx, y: hitBottom.cy }
-                : { x: hitCenter.cx, y: hitCenter.cy };
-
-              handleCatch(item, contactPoint);
-              popsiclesRef.current.splice(i, 1);
-              continue;
+                handleCatch(item, hitPoint, isSweetSpot);
+                popsiclesRef.current.splice(i, 1);
+                continue;
+              }
             }
           }
 
@@ -1218,22 +1327,18 @@ export default function GameCanvas({
         }}
         className="w-full max-w-lg md:max-w-none md:absolute md:top-0 md:inset-x-0 z-30 px-2.5 sm:px-4 md:px-6 pb-1 md:pt-6 flex items-center justify-between pointer-events-auto flex-shrink-0 md:bg-gradient-to-b md:from-black/90 md:via-black/50 md:to-transparent"
       >
-        {/* Left: Player Profile & Live Score Pill (Reference Design) */}
+        {/* Left: Player Profile & Live Runs / Score Pill */}
         <div className="flex items-center space-x-1.5 sm:space-x-3.5 bg-[#181922]/95 backdrop-blur-2xl border border-[#38394a] sm:border-2 shadow-[0_10px_30px_rgba(0,0,0,0.85)] rounded-full py-0.5 px-2 sm:py-2 sm:px-4 ring-1 ring-white/10 select-none transition-all flex-shrink min-w-0">
-          {/* Avatar Ring */}
           <div className="relative flex-shrink-0">
-            {/* Glowing Sunset Ring */}
             <div className="w-8 h-8 sm:w-12 sm:h-12 rounded-full p-[1.5px] sm:p-[2px] bg-gradient-to-tr from-[#ff2a6d] via-[#ff6a00] to-[#ffaa00] shadow-[0_0_12px_rgba(255,106,0,0.45)] flex items-center justify-center overflow-hidden">
               <CartoonAvatar name={player.name} size="md" className="w-full h-full" />
             </div>
           </div>
 
-          {/* Name & Live Score */}
           <div className="flex flex-col justify-center min-w-0 pr-1 sm:pr-2.5 md:pr-3">
-            {/* Top row: SCORE on mobile, Player Name on desktop */}
             <div className="leading-tight flex items-center justify-between gap-1.5">
               <span className="text-slate-300 font-black text-[9px] tracking-[0.14em] uppercase block md:hidden">
-                SCORE
+                RUNS
               </span>
               <span className="text-white font-black text-sm tracking-[0.08em] uppercase truncate max-w-[200px] md:max-w-[320px] lg:max-w-[420px] drop-shadow-sm hidden md:block">
                 {player.name}
@@ -1245,7 +1350,6 @@ export default function GameCanvas({
               )}
             </div>
 
-            {/* Bottom row: Score + Soft Serve Ice Cream Cone */}
             <div className="flex items-center space-x-1 sm:space-x-1.5 mt-0.5">
               <span className="font-black text-sm sm:text-2xl text-[#ffaa00] tracking-tight leading-none drop-shadow-[0_2px_8px_rgba(255,170,0,0.35)]">
                 {score.toLocaleString()}
@@ -1289,7 +1393,8 @@ export default function GameCanvas({
       {/* Camera Viewport: 3:4 on Mobile (Uncropped Portrait) | Full Screen on Desktop */}
       <div
         ref={containerRef}
-        className="relative w-full max-w-md md:max-w-none md:fixed md:inset-0 md:w-full md:h-full md:aspect-auto md:max-h-none md:my-0 md:rounded-none md:border-0 md:shadow-none aspect-[3/4] max-h-[76vh] mt-2.5 sm:mt-3.5 mb-auto flex items-center justify-center overflow-hidden rounded-2xl sm:rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.9)] border border-white/10 bg-slate-900"
+        onPointerMove={handlePointerMove}
+        className="relative w-full max-w-md md:max-w-none md:fixed md:inset-0 md:w-full md:h-full md:aspect-auto md:max-h-none md:my-0 md:rounded-none md:border-0 md:shadow-none aspect-[3/4] max-h-[76vh] mt-2.5 sm:mt-3.5 mb-auto flex items-center justify-center overflow-hidden rounded-2xl sm:rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.9)] border border-white/10 bg-slate-900 cursor-crosshair"
       >
         {/* Native Camera Video Feed */}
         <video
@@ -1307,7 +1412,6 @@ export default function GameCanvas({
 
         {/* Top-Center In-Camera HUD (Stopwatch Timer & Combo Pill Stack) */}
         <div className="absolute top-1.5 sm:top-2 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center space-y-1.5 pointer-events-none select-none transition-all duration-300">
-          {/* 1. Realistic 3D Stopwatch Timer inside Camera Window */}
           {timerConfig.enabled && countdown === null && !isGameOver && (
             <StopwatchTimer
               timeLeft={timeLeft}
@@ -1315,12 +1419,11 @@ export default function GameCanvas({
             />
           )}
 
-          {/* 2. Active Multiplier / Combo Indicator (Stacked below stopwatch) */}
           {combo > 1 && (
             <div className="transition-all duration-300 animate-bounce">
               <span className="inline-flex items-center space-x-1.5 text-xs sm:text-sm font-black text-white bg-gradient-to-r from-rose-600 to-amber-500 backdrop-blur-md px-3 py-1 rounded-full border border-white/30 shadow-xl shadow-rose-600/40">
                 <Flame className="w-3.5 h-3.5 fill-amber-300 text-amber-300 animate-pulse" />
-                <span className="tracking-wide">{combo}x Combo!</span>
+                <span className="tracking-wide">{combo}x Streak!</span>
               </span>
             </div>
           )}
@@ -1329,7 +1432,6 @@ export default function GameCanvas({
         {/* Loading Overlay */}
         {(loadingAI || loadingCamera) && !cameraError && (
           <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-xl text-white p-6 text-center animate-fade-in">
-            {/* Animated Brand Pulse Badge */}
             <div className="relative mb-5 flex flex-col items-center">
               <div className="w-full max-w-[220px] h-16 flex items-center justify-center animate-pulse">
                 <img
@@ -1338,19 +1440,18 @@ export default function GameCanvas({
                   className="w-full h-full object-contain filter drop-shadow-md"
                 />
               </div>
-              <div className="mt-2 w-7 h-7 rounded-full bg-slate-900 border-2 border-pink-500 flex items-center justify-center shadow-lg">
-                <div className="w-3.5 h-3.5 border-2 border-pink-400 border-t-transparent rounded-full animate-spin"></div>
+              <div className="mt-2 w-7 h-7 rounded-full bg-slate-900 border-2 border-amber-500 flex items-center justify-center shadow-lg">
+                <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
               </div>
             </div>
 
-            <h2 className="text-xl md:text-2xl font-black bg-gradient-to-r from-pink-400 via-rose-300 to-amber-300 bg-clip-text text-transparent mb-1.5">
-              Preparing AR Game
+            <h2 className="text-xl md:text-2xl font-black bg-gradient-to-r from-amber-400 via-rose-300 to-pink-400 bg-clip-text text-transparent mb-1.5">
+              Preparing AR Cricket Game
             </h2>
             <p className="text-xs text-slate-400 max-w-xs mb-6 leading-relaxed">
-              Elephant House AR Experience is initializing camera and AI tongue tracking.
+              Elephant House & Sampath Bat AR Experience is initializing camera and AI bat tracking.
             </p>
 
-            {/* Checklist Progress Card */}
             <div className="w-full max-w-xs bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-2.5 shadow-xl text-left">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-slate-300 font-semibold flex items-center space-x-2">
@@ -1373,7 +1474,7 @@ export default function GameCanvas({
               <div className="flex items-center justify-between text-xs pt-1.5 border-t border-slate-800/80">
                 <span className="text-slate-300 font-semibold flex items-center space-x-2">
                   <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Face & Tongue AI</span>
+                  <span>Cricket Bat & Pose AI</span>
                 </span>
                 {!loadingAI ? (
                   <span className="text-emerald-400 font-bold flex items-center space-x-1 text-[11px]">
@@ -1390,7 +1491,7 @@ export default function GameCanvas({
             </div>
 
             <p className="text-[11px] text-slate-500 mt-6 max-w-xs">
-              💡 Tip: Ensure good lighting and center your face in the camera.
+              💡 Tip: Hold a cricket bat or grip your hands in a batting stance in front of the camera.
             </p>
           </div>
         )}
@@ -1415,26 +1516,24 @@ export default function GameCanvas({
           </div>
         )}
 
-        {/* Countdown Overlay (Clear camera background so player can see face and position themselves!) */}
+        {/* Countdown Overlay */}
         {countdown !== null && !loadingAI && !loadingCamera && !cameraError && (
           <div className="absolute inset-0 z-30 flex flex-col items-center justify-center pointer-events-none p-4 animate-fade-in">
-            {/* Center Animated Countdown Ring Pill */}
             <div className="flex flex-col items-center">
-              <div className="w-32 h-32 md:w-36 md:h-36 rounded-full bg-slate-950/80 backdrop-blur-md border-2 border-pink-500/80 shadow-2xl shadow-pink-500/40 flex items-center justify-center transform animate-pulse mb-4">
-                <span className="text-6xl md:text-7xl font-black bg-gradient-to-tr from-pink-500 via-rose-400 to-amber-300 bg-clip-text text-transparent drop-shadow-lg">
+              <div className="w-32 h-32 md:w-36 md:h-36 rounded-full bg-slate-950/80 backdrop-blur-md border-2 border-amber-500/80 shadow-2xl shadow-amber-500/40 flex items-center justify-center transform animate-pulse mb-4">
+                <span className="text-6xl md:text-7xl font-black bg-gradient-to-tr from-amber-400 via-rose-400 to-pink-500 bg-clip-text text-transparent drop-shadow-lg">
                   {countdown === 0 ? 'GO!' : countdown}
                 </span>
               </div>
 
-              {/* Floating Guidance Badge */}
-              <div className="px-5 py-2.5 rounded-2xl bg-slate-900/90 backdrop-blur-md border border-pink-500/40 shadow-2xl text-center max-w-xs">
+              <div className="px-5 py-2.5 rounded-2xl bg-slate-900/90 backdrop-blur-md border border-amber-500/40 shadow-2xl text-center max-w-xs">
                 <p className="text-white text-xs md:text-sm font-extrabold flex items-center justify-center space-x-1.5">
-                  <span>👅</span>
-                  <span>Stick out your tongue to catch!</span>
+                  <span>🏏</span>
+                  <span>Get ready to Bat! Swing to catch!</span>
                   <span>🍦</span>
                 </p>
                 <p className="text-[10px] text-slate-300 mt-0.5 font-medium">
-                  Center your face in the camera
+                  Hold your bat or raise your hands in camera
                 </p>
               </div>
             </div>
@@ -1471,7 +1570,7 @@ export default function GameCanvas({
           </div>
         )}
 
-        {/* Bottom Live Tongue Guidance Pill with Guaranteed Bottom Safe Area Inset */}
+        {/* Bottom Live Bat Guidance Pill */}
         {countdown === null && !isGameOver && !isPaused && (
           <div
             style={{
@@ -1481,13 +1580,17 @@ export default function GameCanvas({
           >
             <div
               className={`px-4 py-2 rounded-full backdrop-blur-md text-xs font-black flex items-center space-x-2 border transition-all duration-300 shadow-xl ${
-                isMouthOpen
+                isBatDetected
                   ? 'bg-emerald-500/30 text-emerald-300 border-emerald-500/50 scale-105 shadow-emerald-500/20'
                   : 'bg-black/70 text-slate-300 border-white/20'
               }`}
             >
-              <span className="text-base">{isMouthOpen ? '👅' : '👄'}</span>
-              <span>{isMouthOpen ? 'Mouth Open! Catching Active!' : 'Open mouth & stick out tongue!'}</span>
+              <span className="text-base">🏏</span>
+              <span>
+                {isBatDetected
+                  ? 'Bat in Position! Swing to catch ice creams!'
+                  : 'Raise your bat or hands in batting stance!'}
+              </span>
             </div>
           </div>
         )}
@@ -1513,7 +1616,6 @@ export default function GameCanvas({
       {isGameOver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pt-12 pb-6 bg-black/80 backdrop-blur-lg animate-fade-in overflow-y-auto">
           <div className="relative w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-7 pt-8 text-center shadow-2xl border border-pink-500/30 my-auto">
-            {/* Floating Top Trophy Badge with Ample Breathing Room */}
             <div className="w-18 h-18 sm:w-20 sm:h-20 mx-auto -mt-16 sm:-mt-18 bg-gradient-to-tr from-pink-500 via-rose-500 to-amber-400 rounded-3xl p-1 shadow-2xl flex items-center justify-center filter drop-shadow-[0_10px_15px_rgba(244,63,94,0.35)]">
               <div className="w-full h-full bg-white dark:bg-slate-900 rounded-[22px] flex items-center justify-center">
                 <Trophy className="w-9 h-9 sm:w-10 sm:h-10 text-amber-500 drop-shadow-[0_2px_8px_rgba(245,158,11,0.6)] animate-pulse" />
@@ -1521,13 +1623,12 @@ export default function GameCanvas({
             </div>
 
             <h2 className="text-2xl sm:text-3xl font-black text-slate-800 dark:text-white mt-3">
-              Game Finished!
+              Innings Finished!
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 mb-1">
-              Great catch session, {player.name}! 🍦
+              Outstanding batting session, {player.name}! 🏏
             </p>
 
-            {/* Score Showcase */}
             <div className="my-4 p-4 bg-gradient-to-br from-pink-50 to-amber-50 dark:from-pink-950/40 dark:to-amber-950/30 rounded-2xl border border-pink-200 dark:border-pink-800/40 shadow-xs relative overflow-hidden">
               {isNewHighScore ? (
                 <div className="inline-flex items-center space-x-1.5 bg-gradient-to-r from-amber-500 via-rose-500 to-pink-500 text-white font-black text-xs px-3.5 py-1 rounded-full shadow-md animate-bounce mb-2">
@@ -1536,21 +1637,20 @@ export default function GameCanvas({
                 </div>
               ) : (
                 <div className="text-xs uppercase tracking-wider font-extrabold text-pink-600 dark:text-pink-400">
-                  Round Score
+                  Round Runs
                 </div>
               )}
               <div className="text-5xl font-black bg-gradient-to-r from-pink-600 via-rose-500 to-amber-500 bg-clip-text text-transparent my-1">
                 {score}
               </div>
               <p className="text-xs text-slate-600 dark:text-slate-300 font-semibold">
-                Marks Earned This Round
+                Total Runs Earned This Innings
               </p>
 
-              {/* Persistent High Score / Personal Best Record Pill */}
               <div className="mt-2.5 inline-flex items-center space-x-1.5 bg-amber-500/15 border border-amber-500/35 px-3 py-1 rounded-full text-xs font-black text-amber-900 dark:text-amber-200">
                 <Trophy className="w-3.5 h-3.5 text-amber-500 fill-amber-500 flex-shrink-0" />
                 <span>Personal Best:</span>
-                <span className="text-amber-950 dark:text-amber-100 font-black">{highScore} pts</span>
+                <span className="text-amber-950 dark:text-amber-100 font-black">{highScore} runs</span>
               </div>
 
               <div className="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-pink-200/60 dark:border-pink-800/40 text-xs">
@@ -1559,7 +1659,7 @@ export default function GameCanvas({
                   <p className="font-black text-slate-800 dark:text-slate-200 text-sm mt-0.5">{catches} 🍦</p>
                 </div>
                 <div>
-                  <p className="text-slate-400 text-[10px] uppercase font-bold">Max Combo</p>
+                  <p className="text-slate-400 text-[10px] uppercase font-bold">Max Streak</p>
                   <p className="font-black text-rose-500 text-sm mt-0.5">{maxCombo}x 🔥</p>
                 </div>
                 <div>
@@ -1569,8 +1669,7 @@ export default function GameCanvas({
               </div>
             </div>
 
-
-            {/* Top 3 Champions Leaderboard Showcase (Clean Light Theme) */}
+            {/* Top 3 Champions Leaderboard Showcase */}
             <div className="my-4 p-3.5 bg-gradient-to-br from-amber-50/90 via-pink-50/60 to-rose-50/90 rounded-2xl border border-pink-200/80 text-left shadow-sm">
               <div className="flex items-center justify-between mb-2.5 px-0.5">
                 <div className="flex items-center space-x-1.5">
@@ -1626,7 +1725,6 @@ export default function GameCanvas({
 
             {/* Action Buttons */}
             <div className="space-y-2.5">
-              {/* Play Again (Primary CTA) */}
               <button
                 onClick={() => {
                   setIsGameOver(false);
@@ -1653,7 +1751,6 @@ export default function GameCanvas({
                 <span>Play Again ({player.name})</span>
               </button>
 
-              {/* Next Player / Switch Player Button (Prominent for Kiosk / Shared Device!) */}
               <button
                 type="button"
                 onClick={onChangePlayer}
@@ -1663,7 +1760,6 @@ export default function GameCanvas({
                 <span>Next Player / Change Name</span>
               </button>
 
-              {/* Share Score Card to Socials Button */}
               <button
                 type="button"
                 onClick={() => setShowSocialShareModal(true)}
@@ -1680,12 +1776,10 @@ export default function GameCanvas({
       {/* Custom End Game Confirmation Dialog */}
       {showEndGameConfirm && !isGameOver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xl animate-fade-in">
-          {/* Ambient Glows behind modal */}
           <div className="absolute w-72 h-72 bg-rose-600/20 rounded-full blur-3xl pointer-events-none"></div>
           <div className="absolute w-60 h-60 bg-amber-500/15 rounded-full blur-3xl pointer-events-none"></div>
 
           <div className="relative w-full max-w-sm bg-[#181922]/98 backdrop-blur-2xl border-2 border-[#38394a] rounded-3xl p-6 sm:p-7 text-white shadow-[0_20px_60px_rgba(0,0,0,0.95)] ring-1 ring-white/10 select-none">
-            {/* Close button */}
             <button
               onClick={handleResumeGame}
               className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white rounded-xl hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
@@ -1693,7 +1787,6 @@ export default function GameCanvas({
               <X className="w-5 h-5" />
             </button>
 
-            {/* Icon Header */}
             <div className="flex flex-col items-center text-center mb-5">
               <div className="w-16 h-16 rounded-3xl bg-gradient-to-tr from-rose-500/25 to-pink-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mb-3.5 shadow-[0_0_20px_rgba(244,63,94,0.3)] animate-pulse">
                 <div className="w-7 h-7 rounded-lg border-2 border-rose-400 flex items-center justify-center">
@@ -1705,14 +1798,13 @@ export default function GameCanvas({
                 End Current Game?
               </h2>
               <p className="text-xs text-slate-400 mt-1.5 leading-relaxed max-w-xs">
-                Game is currently <span className="font-bold text-amber-400">paused</span>. Would you like to finish now and record your score?
+                Game is currently <span className="font-bold text-amber-400">paused</span>. Would you like to finish now and record your runs?
               </p>
             </div>
 
-            {/* Current Session Stats Preview Card */}
             <div className="grid grid-cols-3 gap-2 bg-[#12131a] p-3.5 rounded-2xl border border-[#2c2d3d] text-center mb-6 shadow-inner">
               <div className="flex flex-col items-center justify-center">
-                <div className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Score</div>
+                <div className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Runs</div>
                 <div className="text-lg sm:text-xl font-black text-[#ffaa00] mt-0.5 drop-shadow-[0_2px_8px_rgba(255,170,0,0.3)]">
                   {score.toLocaleString()}
                 </div>
@@ -1732,7 +1824,6 @@ export default function GameCanvas({
               </div>
             </div>
 
-            {/* Modal Action Buttons */}
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -1756,7 +1847,7 @@ export default function GameCanvas({
         </div>
       )}
 
-      {/* Social Share Modal (Story & Post formats, Auto-Copied Caption, IG/FB Direct Sharing) */}
+      {/* Social Share Modal */}
       <SocialShareModal
         isOpen={showSocialShareModal}
         onClose={() => setShowSocialShareModal(false)}
